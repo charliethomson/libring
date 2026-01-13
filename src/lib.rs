@@ -123,6 +123,12 @@ impl<T> RingBuffer<T> {
     }
 }
 
+impl<T: PartialEq> PartialEq for RingBuffer<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().zip(other.iter()).all(|(a, b)| a == b)
+    }
+}
+
 impl<T: Clone> Clone for RingBuffer<T> {
     fn clone(&self) -> Self {
         let mut buffer = RingBuffer::new(self.capacity);
@@ -142,6 +148,47 @@ impl<'a, T> From<&'a [T]> for RingBuffer<&'a T> {
         let mut buffer = RingBuffer::new(slice.len());
         buffer.fill_from(slice.iter());
         buffer
+    }
+}
+
+#[cfg(feature = "serde")]
+mod _serde_impl {
+    use serde::{Deserialize, Serialize};
+
+    use crate::RingBuffer;
+    impl<T: Serialize> Serialize for RingBuffer<T> {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer.collect_seq(self)
+        }
+    }
+
+    impl<'de, T> Deserialize<'de> for RingBuffer<T>
+    where
+        T: Deserialize<'de>,
+    {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            let vec = Vec::deserialize(deserializer)?;
+            Ok(Self::from_vec_raw(vec))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_serde() {
+            let buffer: RingBuffer<i32> = RingBuffer::from(vec![1, 2, 3]);
+            let serialized = serde_json::to_string(&buffer).unwrap();
+            let deserialized: RingBuffer<i32> = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(buffer, deserialized);
+        }
     }
 }
 
