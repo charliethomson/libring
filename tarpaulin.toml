@@ -1,0 +1,5 @@
+[configs.default]
+rustflags = "-C inline-threshold=0 -C link-dead-code"
+ignore-tests = true
+# This ensures you get a clean run every time
+clean = true

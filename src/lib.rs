@@ -1,4 +1,11 @@
-use std::fmt::Debug;
+mod util;
+
+use std::{
+    fmt::Debug,
+    ops::{Index, IndexMut},
+};
+
+use crate::util::{flat_mut, flat_ref};
 
 pub struct RingBuffer<T> {
     buffer: Vec<Option<T>>,
@@ -95,11 +102,12 @@ impl<T> RingBuffer<T> {
     where
         T: Clone,
     {
-        self.fill_from(std::iter::repeat(value));
+        self.fill_from(std::iter::repeat_n(value, self.capacity));
     }
 
-    pub fn fill_with(&mut self, mut f: impl FnMut() -> T) {
-        self.fill_from(std::iter::from_fn(|| Some(f())).take(self.capacity));
+    pub fn fill_with(&mut self, mut f: impl FnMut(usize) -> T) {
+        let iter = (0..).map(|o| f(o)).take(self.capacity);
+        self.fill_from(iter);
     }
 
     pub fn fill_from<I>(&mut self, iter: I)
@@ -115,11 +123,101 @@ impl<T> RingBuffer<T> {
         self.count
     }
 
+    pub fn clear(&mut self) {
+        self.count = 0;
+        self.head = 0;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.count == self.capacity
+    }
+
+    pub fn replace(&mut self, index: usize, value: T) -> Option<T> {
+        if index > self.count {
+            None
+        } else {
+            self.replace_unchecked(index, value)
+        }
+    }
+
+    pub fn replace_unchecked(&mut self, index: usize, value: T) -> Option<T> {
+        if index > self.count {
+            panic!("Index out of bounds");
+        }
+
+        let offset = self.offset(index);
+        let v = (&mut self.buffer)[offset].take();
+
+        (&mut self.buffer)[offset] = Some(value);
+
+        v
+    }
+
+    pub fn first(&self) -> Option<&T> {
+        self.get(0)
+    }
+
+    pub fn first_mut(&mut self) -> Option<&mut T> {
+        self.get_mut(0)
+    }
+
+    pub fn last(&self) -> Option<&T> {
+        self.get(self.count - 1)
+    }
+
+    pub fn last_mut(&mut self) -> Option<&mut T> {
+        self.get_mut(self.count - 1)
+    }
+
+    pub fn get(&self, index: usize) -> Option<&T> {
+        if index >= self.len() {
+            None
+        } else {
+            let offset = self.offset(index);
+            flat_ref(self.buffer.get(offset))
+        }
+    }
+
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        if index >= self.len() {
+            None
+        } else {
+            let offset = self.offset(index);
+            flat_mut(self.buffer.get_mut(offset))
+        }
+    }
+
+    pub unsafe fn into_raw_buffer(&mut self) -> &mut Vec<Option<T>> {
+        &mut self.buffer
+    }
+
+    pub unsafe fn set_count(&mut self, count: usize) {
+        self.count = count;
+    }
+
     pub fn iter<'a>(&'a self) -> RingBufferIter<'a, T> {
         RingBufferIter {
             buffer: self,
             offset: 0,
         }
+    }
+}
+
+impl<T> Index<usize> for RingBuffer<T> {
+    type Output = T;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        self.get(index).expect("index out of bounds")
+    }
+}
+
+impl<T> IndexMut<usize> for RingBuffer<T> {
+    fn index_mut(&mut self, index: usize) -> &mut <Self as Index<usize>>::Output {
+        self.get_mut(index).expect("index out of bounds")
     }
 }
 
@@ -301,6 +399,24 @@ mod tests {
 
         let vec = buffer.to_vec();
         assert_eq!(vec, vec![1, 2, 3]);
+
+        let mut buffer = RingBuffer::new(3);
+        buffer.push(1);
+        buffer.push(2);
+        buffer.push(3);
+
+        unsafe {
+            buffer.set_count(2);
+        }
+        let vec = buffer.to_vec();
+        assert_eq!(vec, vec![1, 2]);
+
+        let mut buffer = RingBuffer::new(3);
+        buffer.push(1);
+        buffer.push(2);
+
+        let vec = buffer.to_vec();
+        assert_eq!(vec, vec![1, 2]);
     }
 
     #[test]
@@ -324,5 +440,246 @@ mod tests {
         let debug = format!("{:?}", buffer);
         let expected = format!("{:?}", vec![1, 2, 3]);
         assert_eq!(debug, expected);
+    }
+
+    #[test]
+    fn test_clear() {
+        let mut buffer = RingBuffer::new(3);
+        buffer.push(1);
+        buffer.push(2);
+        buffer.push(3);
+        buffer.clear();
+        assert_eq!(buffer.len(), 0);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_is_empty() {
+        let mut buffer = RingBuffer::new(3);
+        assert!(buffer.is_empty());
+        buffer.push(1);
+        assert!(!buffer.is_empty());
+        buffer.clear();
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_is_full() {
+        let mut buffer = RingBuffer::new(3);
+        assert!(!buffer.is_full());
+        buffer.push(1);
+        buffer.push(2);
+        buffer.push(3);
+        assert!(buffer.is_full());
+    }
+
+    #[test]
+    fn test_replace() {
+        let mut buffer = RingBuffer::new(3);
+        buffer.push(1);
+        buffer.push(2);
+        buffer.push(3);
+        let result = buffer.replace(0, 4);
+        assert_eq!(buffer.to_vec_ref(), vec![&4, &2, &3]);
+        assert_eq!(result, Some(1));
+        let result = buffer.replace(5, 4);
+        assert_eq!(buffer.to_vec_ref(), vec![&4, &2, &3]);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_replace_unchecked() {
+        let mut buffer = RingBuffer::new(3);
+        buffer.push(1);
+        buffer.push(2);
+        buffer.push(3);
+        let result = buffer.replace_unchecked(0, 4);
+        assert_eq!(buffer.to_vec_ref(), vec![&4, &2, &3]);
+        assert_eq!(result, Some(1));
+    }
+
+    #[test]
+    fn test_first() {
+        let mut buffer = RingBuffer::new(3);
+        buffer.push(1); // [<1>,  _ ,  _ ]
+        assert_eq!(buffer.first(), Some(&1));
+        buffer.push(2); // [<1>,  2 ,  _ ]
+        assert_eq!(buffer.first(), Some(&1));
+        buffer.push(3); // [<1>,  2 ,  3 ]
+        assert_eq!(buffer.first(), Some(&1));
+        buffer.push(2); // [ 2 , <2>,  3 ]
+        assert_eq!(buffer.first(), Some(&2));
+        buffer.push(3); // [ 2 ,  3 , <3>]
+        assert_eq!(buffer.first(), Some(&3));
+        buffer.push(3); // [<2>,  3,   3 ]
+        assert_eq!(buffer.first(), Some(&2));
+    }
+
+    #[test]
+    fn test_last() {
+        let mut buffer = RingBuffer::new(3);
+        buffer.push(1); // [<1>,  _ ,  _ ]
+        assert_eq!(buffer.last(), Some(&1));
+        buffer.push(2); // [ 1 , <2>,  _ ]
+        assert_eq!(buffer.last(), Some(&2));
+        buffer.push(3); // [ 1 ,  2 , <3>]
+        assert_eq!(buffer.last(), Some(&3));
+        buffer.push(2); // [<2>,  2 ,  3 ]
+        assert_eq!(buffer.last(), Some(&2));
+        buffer.push(3); // [ 2 ,  <3>,  3 ]
+        assert_eq!(buffer.last(), Some(&3));
+        buffer.push(3); // [ 2 ,  3,  <3>]
+        assert_eq!(buffer.last(), Some(&3));
+    }
+
+    #[test]
+    fn test_get() {
+        let mut buffer = RingBuffer::new(3);
+        buffer.push(1);
+        assert_eq!(buffer.get(0), Some(&1));
+        assert_eq!(buffer.get(1), None);
+        assert_eq!(buffer.get(2), None);
+
+        assert_eq!(buffer.first_mut(), Some(&mut 1));
+        assert_eq!(buffer.last_mut(), Some(&mut 1));
+
+        assert_eq!(buffer.get_mut(0), Some(&mut 1));
+        assert_eq!(buffer.get_mut(1), None);
+        assert_eq!(buffer.get_mut(2), None);
+    }
+
+    #[test]
+    fn test_fill() {
+        let mut buffer = RingBuffer::new(3);
+        buffer.fill(1);
+        assert_eq!(buffer.get(0), Some(&1));
+        assert_eq!(buffer.get(1), Some(&1));
+        assert_eq!(buffer.get(2), Some(&1));
+    }
+
+    #[test]
+    fn test_fill_from() {
+        let mut buffer = RingBuffer::new(3);
+        buffer.fill_from(std::iter::repeat(2).take(3));
+        assert_eq!(buffer.get(0), Some(&2));
+        assert_eq!(buffer.get(1), Some(&2));
+        assert_eq!(buffer.get(2), Some(&2));
+    }
+
+    #[test]
+    fn test_fill_from_partial_fill() {
+        let mut buffer = RingBuffer::new(30);
+        buffer.fill_from(std::iter::repeat_n(3, 3));
+        assert_eq!(buffer.get(0), Some(&3));
+        assert_eq!(buffer.get(1), Some(&3));
+        assert_eq!(buffer.get(2), Some(&3));
+        assert_eq!(buffer.get(3), None);
+    }
+
+    #[test]
+    fn test_fill_from_overfill() {
+        let mut buffer = RingBuffer::new(3);
+        buffer.fill_from(0..5);
+        assert_eq!(buffer.get(0), Some(&2));
+        assert_eq!(buffer.get(1), Some(&3));
+        assert_eq!(buffer.get(2), Some(&4));
+    }
+
+    #[test]
+    fn test_fill_with() {
+        let mut buffer = RingBuffer::new(3);
+        buffer.fill_with(|i| i * 2);
+        assert_eq!(buffer.get(0), Some(&0));
+        assert_eq!(buffer.get(1), Some(&2));
+        assert_eq!(buffer.get(2), Some(&4));
+    }
+
+    #[test]
+    fn test_from_vec_raw() {
+        let buffer = RingBuffer::from_vec_raw(vec![1, 2, 3]);
+        assert_eq!(buffer.get(0), Some(&1));
+        assert_eq!(buffer.get(1), Some(&2));
+        assert_eq!(buffer.get(2), Some(&3));
+    }
+}
+
+#[cfg(test)]
+mod trait_tests {
+    use super::*;
+
+    #[test]
+    fn test_from_slice() {
+        let data = vec![1, 2, 3, 4];
+
+        let buffer = RingBuffer::from(&data[2..]);
+        assert_eq!(buffer.get(0), Some(&&3));
+        assert_eq!(buffer.get(1), Some(&&4));
+    }
+
+    #[test]
+    fn test_from_vec() {
+        let buffer = RingBuffer::from(vec![1, 2, 3]);
+        assert_eq!(buffer.get(0), Some(&1));
+        assert_eq!(buffer.get(1), Some(&2));
+        assert_eq!(buffer.get(2), Some(&3));
+    }
+
+    #[test]
+    fn test_clone() {
+        let buffer = RingBuffer::from(vec![1, 2, 3]);
+        let cloned_buffer = buffer.clone();
+        assert_eq!(cloned_buffer.get(0), Some(&1));
+        assert_eq!(cloned_buffer.get(1), Some(&2));
+        assert_eq!(cloned_buffer.get(2), Some(&3));
+    }
+
+    #[test]
+    fn test_eq() {
+        let buffer1 = RingBuffer::from(vec![1, 2, 3]);
+        let buffer2 = RingBuffer::from(vec![1, 2, 3]);
+        assert_eq!(buffer1, buffer2);
+    }
+
+    #[test]
+    fn test_indices() {
+        let mut buffer = RingBuffer::from(vec![1, 2, 3]);
+        assert_eq!(&buffer[0], &1);
+        assert_eq!(&mut buffer[1], &mut 2);
+    }
+}
+
+#[cfg(test)]
+mod unsafe_tests {
+
+    use super::*;
+
+    #[test]
+    fn test_into_buffer_raw() {
+        let mut buffer = RingBuffer::new(3);
+        buffer.fill_from(0..4);
+        assert_eq!(buffer.get(0), Some(&1));
+        assert_eq!(buffer.get(1), Some(&2));
+        assert_eq!(buffer.get(2), Some(&3));
+
+        let raw_buffer = unsafe { buffer.into_raw_buffer() };
+        assert_eq!(raw_buffer[0], Some(3));
+        assert_eq!(raw_buffer[1], Some(1));
+        assert_eq!(raw_buffer[2], Some(2));
+    }
+
+    #[test]
+    fn test_set_count() {
+        let mut buffer = RingBuffer::new(3);
+        buffer.fill_from(0..4);
+        assert_eq!(buffer.get(0), Some(&1));
+        assert_eq!(buffer.get(1), Some(&2));
+        assert_eq!(buffer.get(2), Some(&3));
+
+        unsafe {
+            buffer.set_count(2);
+        }
+        assert_eq!(buffer.get(0), Some(&1));
+        assert_eq!(buffer.get(1), Some(&2));
+        assert_eq!(buffer.get(2), None);
     }
 }
